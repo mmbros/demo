@@ -1,0 +1,77 @@
+package main
+
+import "github.com/mmbros/demo/treepath"
+
+// Navigator implements Navigator interface for Node
+type Navigator struct {
+	node *Node
+
+	// position in parent.children list.
+	// if -1, must be calculated
+	childIndex int
+}
+
+// NewNavigator creates a new Navigator starting from given Node.
+func NewNavigator(n *Node) *Navigator {
+	if n == nil {
+		return nil
+	}
+	return &Navigator{n, -1}
+}
+
+// Parent returns the parent element.
+// It returns nil in case of root element.
+func (nav *Navigator) Parent() treepath.Element {
+	if p := nav.node.parent; p != nil {
+		return treepath.Element(&Navigator{p, -1})
+	}
+	return nil
+}
+
+func (nav *Navigator) Children() []treepath.Element {
+	elements := make([]treepath.Element, len(nav.node.children))
+	for j, c := range nav.node.children {
+		elements[j] = &Navigator{c, j}
+	}
+	return elements
+}
+
+// NextSibling returns the next sibling.
+// It returns nil in case of no more siblings.
+func (nav *Navigator) NextSibling() treepath.Element {
+	p := nav.node.parent
+	if p == nil {
+		return nil
+	}
+	idx := nav.childIndex
+	if idx < 0 {
+		// find the current node position in parent children list
+		for j, c := range p.children {
+			if c == nav.node {
+				idx = j
+				break
+			}
+		}
+	}
+	idx++ // next child
+	if idx >= len(p.children) {
+		return nil
+	}
+	return treepath.Element(&Navigator{p.children[idx], idx})
+}
+
+// FirstChild returns the first child of the element.
+// It returns nil in case of no children.
+func (nav *Navigator) FirstChild() treepath.Element {
+	if c := nav.node.children; len(c) > 0 {
+		return treepath.Element(&Navigator{c[0], 0})
+	}
+	return nil
+}
+
+func (nav *Navigator) String() string { return nav.node.name }
+
+// MatchTag returns true if the ...
+func (nav *Navigator) MatchTag(tag string) bool {
+	return nav.node.name == tag
+}
