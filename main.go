@@ -64,10 +64,10 @@ func main() {
 	if err != nil {
 		fmt.Println(err)
 	}
-	nav := Navigator{root}
+	nav := NodeElement{root}
 
 	fmt.Printf("root: %p\n", root)
-	fmt.Printf("nav : %p\n", nav.node)
+	fmt.Printf("nav : %p\n", nav)
 
 	res := path.FindElements(&nav)
 	for j, e := range res {
