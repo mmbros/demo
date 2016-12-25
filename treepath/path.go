@@ -2,18 +2,24 @@ package treepath
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/mmbros/demo/queue"
 )
 
+// Element interface.
 type Element interface {
 	Parent() Element
 	Children() []Element
 	MatchTag(string) bool
+	MatchTagText(string, string) bool
+	MatchAttr(string) bool
+	MatchAttrText(string, string) bool
 	String() string
 }
 
+// Path is ...
 type Path struct {
 	segments []segment
 }
@@ -170,99 +176,54 @@ func (c *compiler) parseSelector(path string) selector {
 // parseFilter parses a path filter contained within [brackets].
 func (c *compiler) parseFilter(path string) filter {
 	fmt.Println("parseFilter:", path)
-	return nil
+
+	if len(path) == 0 {
+		c.err = ErrPath("path contains an empty filter expression.")
+		return nil
+	}
+
+	// Filter contains [@attr='text'] or [tag='text']?
+	eqindex := strings.Index(path, "='")
+	if eqindex >= 0 {
+		rindex := nextIndex(path, "'", eqindex+2)
+		if rindex != len(path)-1 {
+			c.err = ErrPath("path has mismatched filter quotes.")
+			return nil
+		}
+		switch {
+		case path[0] == '@':
+			// [@attr='text']
+			return newFilterAttrText(path[1:eqindex], path[eqindex+2:rindex])
+		default:
+			// [tag='text']
+			return newFilterChildText(path[:eqindex], path[eqindex+2:rindex])
+		}
+	}
+	// Filter contains [@attr], [N] or [tag]
+	switch {
+	case path[0] == '@':
+		// [@attr]
+		return newFilterAttr(path[1:])
+	case isInteger(path):
+		// [N]
+		pos, _ := strconv.Atoi(path)
+		switch {
+		case pos > 0:
+			return newFilterPos(pos - 1)
+		default:
+			return newFilterPos(pos)
+		}
+	default:
+		// [tag]
+		return newFilterChild(path)
+	}
+
 }
 
 func (seg *segment) apply(e Element, p *pather) {
 	seg.sel.apply(e, p)
 	for _, f := range seg.filters {
 		f.apply(p)
-	}
-}
-
-// selectSelf selects the current element into the candidate list.
-type selectSelf struct{}
-
-func (s *selectSelf) apply(e Element, p *pather) {
-
-	fmt.Println("selectSelf:", e.String())
-	p.candidates = append(p.candidates, e)
-}
-
-// selectParent selects the element's parent into the candidate list.
-type selectParent struct{}
-
-func (s *selectParent) apply(e Element, p *pather) {
-
-	if parent := e.Parent(); parent != nil {
-		fmt.Println("selectParent of ", e.String(), ": ", parent.String())
-		p.candidates = append(p.candidates, parent)
-	}
-}
-
-// selectChildren selects the element's child elements into the
-// candidate list.
-type selectChildren struct{}
-
-func (s *selectChildren) apply(e Element, p *pather) {
-	for _, child := range e.Children() {
-
-		fmt.Println("selectChildren of ", e.String(), ": ", child.String())
-		p.candidates = append(p.candidates, child)
-	}
-}
-
-// selectDescendants selects all descendant child elements
-// of the element into the candidate list.
-type selectDescendants struct{}
-
-func (s *selectDescendants) apply(e Element, p *pather) {
-	q := queue.NewFifo(0)
-
-	for q.Push(e); q.Len() > 0; {
-		e := q.Pop().(Element)
-
-		fmt.Println("selectDescendant: ", e.String())
-		p.candidates = append(p.candidates, e)
-		for _, c := range e.Children() {
-			q.Push(c)
-		}
-	}
-}
-
-// selectChildrenByTag selects into the candidate list all child
-// elements of the element having the specified tag.
-type selectChildrenByTag struct {
-	tag string
-}
-
-func newSelectChildrenByTag(tag string) *selectChildrenByTag {
-	return &selectChildrenByTag{tag}
-}
-
-func (s *selectChildrenByTag) apply(e Element, p *pather) {
-	for _, c := range e.Children() {
-		if c.MatchTag(s.tag) {
-			fmt.Printf("selectChildrenByTag: parent %s, child %s\n", e.String(), c.String())
-			p.candidates = append(p.candidates, c)
-		}
-	}
-}
-
-// selectByTag selects into the candidate list all child
-// elements of the element having the specified tag.
-type selectByTag struct {
-	tag string
-}
-
-func newSelectByTag(tag string) *selectByTag {
-	return &selectByTag{tag}
-}
-
-func (s *selectByTag) apply(e Element, p *pather) {
-	if e.MatchTag(s.tag) {
-		fmt.Println("selectByTag of ", e.String())
-		p.candidates = append(p.candidates, e)
 	}
 }
 

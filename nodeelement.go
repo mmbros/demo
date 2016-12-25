@@ -24,7 +24,22 @@ func (e NodeElement) Children() []treepath.Element {
 
 func (e NodeElement) String() string { return e.name }
 
-// MatchTag returns true if the ...
+// MatchTag returns true if ...
 func (e NodeElement) MatchTag(tag string) bool {
 	return e.name == tag
+}
+
+// MatchTagText returns true if ...
+func (e NodeElement) MatchTagText(tag, text string) bool {
+	return false
+}
+
+// MatchAttr returns true if ...
+func (e NodeElement) MatchAttr(attr string) bool {
+	return false
+}
+
+// MatchAttrText returns true if ...
+func (e NodeElement) MatchAttrText(attr, text string) bool {
+	return false
 }
