@@ -1,7 +1,6 @@
 package treepath
 
 import (
-	"fmt"
 	"strconv"
 	"strings"
 
@@ -84,7 +83,7 @@ type compiler struct {
 	err ErrPath
 }
 
-// ErrPath is returned by path functions when an invalid etree path is provided.
+// ErrPath is returned by path functions when an invalid path is provided.
 type ErrPath string
 
 // Error returns the string describing a path error.
@@ -157,7 +156,6 @@ func (c *compiler) parseSegment(path string) segment {
 
 // parseSelector parses a selector at the start of a path segment.
 func (c *compiler) parseSelector(path string) selector {
-	fmt.Println("parseSelector:", path)
 	switch path {
 	case ".":
 		return new(selectSelf)
@@ -169,13 +167,11 @@ func (c *compiler) parseSelector(path string) selector {
 		return new(selectDescendants)
 	default:
 		return newSelectChildrenByTag(path)
-		//return newSelectByTag(path)
 	}
 }
 
 // parseFilter parses a path filter contained within [brackets].
 func (c *compiler) parseFilter(path string) filter {
-	fmt.Println("parseFilter:", path)
 
 	if len(path) == 0 {
 		c.err = ErrPath("path contains an empty filter expression.")
