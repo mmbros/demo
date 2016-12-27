@@ -4,13 +4,13 @@ import "strings"
 
 // spaceDecompose breaks a namespace:tag identifier at the ':'
 // and returns the two parts.
-func spaceDecompose(str string) (space, key string) {
-	colon := strings.IndexByte(str, ':')
-	if colon == -1 {
-		return "", str
-	}
-	return str[:colon], str[colon+1:]
-}
+//func spaceDecompose(str string) (space, key string) {
+//colon := strings.IndexByte(str, ':')
+//if colon == -1 {
+//return "", str
+//}
+//return str[:colon], str[colon+1:]
+//}
 
 // nextIndex returns the index of the next occurrence of sep in s,
 // starting from offset.  It returns -1 if the sep string is not found.
