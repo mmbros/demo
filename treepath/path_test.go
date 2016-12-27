@@ -11,6 +11,7 @@ import (
 type Node struct {
 	Name     string  `xml:"name,attr"`
 	Class    string  `xml:"class,attr"`
+	Lang     string  `xml:"lang,attr"`
 	Parent   *Node   `xml:"-"`
 	Children []*Node `xml:"node"`
 }
@@ -34,7 +35,7 @@ const xmlNodes = `
 			<node name="div" class="footer">
 				<node name="p" />
 				<node name="p" />
-				<node name="div">
+				<node name="div" class="sub-footer" lang="en">
 					<node name="p" />
 					<node name="p">
 						<node name="span" />
@@ -75,6 +76,43 @@ var tests = []test{
 	{"//p[2]/span", "span"},
 	{"//p[-1]/span", "span"},
 	{"./html/body/div[2]/div/p[2]/span", "span"},
+
+	//text queries
+	//{"./bookstore/book[author='James McGovern']/title", "XQuery Kick Start"},
+	//{"./bookstore/book[author='Per Bothner']/title", "XQuery Kick Start"},
+	//{"./bookstore/book[author='Kurt Cagle']/title", "XQuery Kick Start"},
+	//{"./bookstore/book[author='James Linn']/title", "XQuery Kick Start"},
+	//{"./bookstore/book[author='Vaidyanathan Nagarajan']/title", "XQuery Kick Start"},
+	//{"//book[p:price='29.99']/title", "Harry Potter"},
+	//{"//book[price='29.99']/title", "Harry Potter"},
+
+	// exists attribute queries
+	{"//div[@class]/ul", "ul"},
+	{"//div[@attr]/ul", nil},
+	{"//div[@class]//.[@class]/p/span", []string{"span", "span"}},
+	{"//.[@class]/p/span", "span"},
+
+	//attribute queries
+	{"//div[@class='footer']/p", []string{"p", "p"}},
+	{"//div[@class='foot']/p", nil},
+	{"//div[@class='footer']//.[@class='sub-footer']/p/span", "span"},
+	{"//div[@class='footer']//.[@lang='en']/p/span", "span"},
+	{"//div[@class='footer']//.[@class='sub-footer'][@lang='en']/p/span", "span"},
+	{"//div[@class='footer']/*/.[@class='sub-footer']/p/span", "span"},
+	{"//div[@class='footer']/*/.[@lang='de']/p/span", nil},
+
+	//parent queries
+	//{"./bookstore/book[@category='COOKING']/title/../../book[4]/title", "Learning XML"},
+	{"//li/..", []string{"ul", "ul"}},
+	{"//li[1]/../..[@class='content']", "div"},
+
+	//bad paths
+	{"/html", errorResult("treepath: paths cannot be absolute.")},
+	{"./html/body[]", errorResult("treepath: path contains an empty filter expression.")},
+	{"./html//p[@lang='en'", errorResult("treepath: path has invalid filter [brackets].")},
+	{"./html//p[@lang='en]", errorResult("treepath: path has mismatched filter quotes.")},
+	{"./html//p[@lang]a", errorResult("treepath: path has invalid filter [brackets].")},
+	{"./html[[]]", errorResult("treepath: path has invalid filter [brackets].")},
 }
 
 func (n *Node) printTree(prefix string) {
@@ -144,11 +182,23 @@ func (e NodeElement) MatchTagText(tag, text string) bool {
 
 // MatchAttr returns true if ...
 func (e NodeElement) MatchAttr(attr string) bool {
+	switch attr {
+	case "class":
+		return e.Class != ""
+	case "lang":
+		return e.Lang != ""
+	}
 	return false
 }
 
 // MatchAttrText returns true if ...
 func (e NodeElement) MatchAttrText(attr, text string) bool {
+	switch attr {
+	case "class":
+		return e.Class == text
+	case "lang":
+		return e.Lang == text
+	}
 	return false
 }
 
@@ -203,6 +253,10 @@ func TestPath(t *testing.T) {
 			}
 		case string:
 			if nodes == nil || len(nodes) != 1 || nodes[0].Name != s {
+
+				for j, e := range nodes {
+					t.Logf("%d) %v\n", j, e)
+				}
 				fail(t, test)
 			}
 		case []string:
