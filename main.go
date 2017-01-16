@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -16,7 +17,76 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"time"
+
+	"github.com/PuerkitoBio/goquery"
 )
+
+// Result cointains the informations returned by a stock price scraper.
+type Result struct {
+
+	// name of the scraper that get the results
+	ScraperName string
+	// url of the html page
+	URL string
+	// stock identifier
+	StockId string
+	// timestamps
+	TimeStart, TimeEnd time.Time
+
+	StockPrice string
+	StockDate  string
+	Err        error
+}
+
+type ParseDocFunc func(doc *goquery.Document) (price string, date string, err error)
+
+type Scraper struct {
+	Name     string
+	Disabled bool
+	ParseDoc ParseDocFunc
+}
+
+func (scraper *Scraper) GetStockPrice(ctx context.Context, stockId, url string) *Result {
+	result := &Result{
+		ScraperName: scraper.Name,
+		URL:         url,
+		StockId:     stockId,
+		TimeStart:   time.Now(),
+	}
+	// use defer to set timeEnd
+	defer func() { result.TimeEnd = time.Now() }()
+
+	// error in case of disabled scraper
+	if scraper.Disabled {
+		result.Err = errors.New("Disabled scraper.")
+		return result
+	}
+
+	// get the response
+	resp, err := GetUrl(ctx, url)
+	if err != nil {
+		result.Err = err
+		return result
+	}
+
+	// create goquery document
+	doc, err := goquery.NewDocumentFromResponse(resp)
+	if err != nil {
+		result.Err = err
+		return result
+	}
+	// parse the response
+	price, date, err := scraper.ParseDoc(doc)
+	if err != nil {
+		result.Err = err
+		return result
+	}
+
+	result.StockPrice = price
+	result.StockDate = date
+
+	return result
+}
 
 func GetUrl(ctx context.Context, url string) (*http.Response, error) {
 
@@ -50,20 +120,20 @@ func GetUrl(ctx context.Context, url string) (*http.Response, error) {
 		return r.resp, r.err
 	}
 }
+func borsaitaliana(doc *goquery.Document) (price string, date string, err error) {
 
-type StockPriceResult struct {
-	// name of the scraper that get the results
-	Scraper string
-	// url of the html page
-	URL string
-	// stock identifier
-	Isin string
-	// timestamps
-	timeStart, timeEnd time.Time
-
-	Price string
-	Date  string
-	Err   error
+	doc.Find("div.l-box > div.l-box > span > strong").Each(func(i int, s *goquery.Selection) {
+		switch i {
+		case 0:
+			price = s.Text()
+		case 3:
+			date = s.Text()
+		}
+	})
+	if price == "" {
+		err = errors.New("Price not found")
+	}
+	return
 }
 
 func TestHandler(w http.ResponseWriter, r *http.Request) {
@@ -78,12 +148,13 @@ func TestHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	time.Sleep(1 * time.Second)
 	fmt.Fprintf(w, "Go! quick %v", headOrTails)
 	//fmt.Printf("Go! quick %v", headOrTails)
 	return
 }
 
-func main() {
+func main2() {
 
 	rand.Seed(time.Now().UTC().UnixNano())
 
@@ -104,4 +175,18 @@ func main() {
 
 	fmt.Printf("%s", text)
 
+}
+
+func main() {
+	bi := Scraper{
+		Name:     "borsaitaliana",
+		ParseDoc: borsaitaliana,
+	}
+
+	ctx := context.TODO()
+	stockId := "btp"
+	url := "http://www.borsaitaliana.it/borsa/obbligazioni/mot/btp/scheda/IT0004009673.html?lang=it"
+	res := bi.GetStockPrice(ctx, stockId, url)
+	fmt.Printf("res = %+v\n", res)
+	fmt.Printf("Elapsed = %+v\n", res.TimeEnd.Sub(res.TimeStart))
 }
