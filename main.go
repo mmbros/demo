@@ -11,11 +11,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/ioutil"
-	"log"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -41,12 +40,33 @@ type Result struct {
 type ParseDocFunc func(doc *goquery.Document) (price string, date string, err error)
 
 type Scraper struct {
+	Name               string
+	Disabled           bool
+	ConcurrentRequests int
+	ParseDoc           ParseDocFunc
+}
+
+type Scrapers map[string]*Scraper
+
+type StockPriceInfo struct {
+	ScraperName string
+	URL         string
+	Disabled    bool
+}
+
+type Stock struct {
+	ID       string
+	Isin     string
 	Name     string
 	Disabled bool
-	ParseDoc ParseDocFunc
+	Sources  []StockPriceInfo
 }
 
 func (scraper *Scraper) GetStockPrice(ctx context.Context, stockId, url string) *Result {
+	if scraper == nil {
+		panic("GetStockPrice: scraper is nil")
+	}
+
 	result := &Result{
 		ScraperName: scraper.Name,
 		URL:         url,
@@ -58,7 +78,7 @@ func (scraper *Scraper) GetStockPrice(ctx context.Context, stockId, url string) 
 
 	// error in case of disabled scraper
 	if scraper.Disabled {
-		result.Err = errors.New("Disabled scraper.")
+		result.Err = errors.New("Disabled scraper")
 		return result
 	}
 
@@ -88,6 +108,47 @@ func (scraper *Scraper) GetStockPrice(ctx context.Context, stockId, url string) 
 	return result
 }
 
+type ScraperRequest struct {
+	ctx     context.Context
+	stockId string
+	url     string
+}
+
+func (scraper *Scraper) dowork(requests <-chan *ScraperRequest, results chan<- *Result) {
+	for req := range requests {
+		results <- scraper.GetStockPrice(req.ctx, req.stockId, req.url)
+	}
+}
+
+func (scraper *Scraper) WorkRequests(requests <-chan *ScraperRequest) {
+
+	if scraper == nil {
+		panic("WorkRequest: scraper is nil")
+	}
+
+	c := make(chan *Result)
+
+	// start a fixed number of worker
+	numWorkers := scraper.ConcurrentRequests
+	if numWorkers < 1 {
+		numWorkers = 1
+	}
+	var wg sync.WaitGroup
+	wg.Add(numWorkers)
+
+	for j := 0; j < numWorkers; j++ {
+		go func() {
+			scraper.dowork(requests, c)
+			wg.Done()
+		}()
+	}
+
+	go func() {
+		wg.Wait()
+		close(c)
+	}()
+}
+
 func GetUrl(ctx context.Context, url string) (*http.Response, error) {
 
 	type result struct {
@@ -95,31 +156,37 @@ func GetUrl(ctx context.Context, url string) (*http.Response, error) {
 		err  error
 	}
 
-	// make the request
-	tr := &http.Transport{}
-	client := &http.Client{Transport: tr}
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	c := make(chan result, 1)
-
-	go func() {
-		resp, err := client.Do(req)
-		c <- result{resp: resp, err: err}
-	}()
-
 	select {
 	case <-ctx.Done():
-		tr.CancelRequest(req)
-		<-c // Wait for client.Do
 		return nil, ctx.Err()
-	case r := <-c:
-		return r.resp, r.err
+	default:
+		// make the request
+		tr := &http.Transport{}
+		client := &http.Client{Transport: tr}
+
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, err
+		}
+
+		c := make(chan result, 1)
+
+		go func() {
+			resp, err := client.Do(req)
+			c <- result{resp: resp, err: err}
+		}()
+
+		select {
+		case <-ctx.Done():
+			tr.CancelRequest(req)
+			<-c // Wait for client.Do
+			return nil, ctx.Err()
+		case r := <-c:
+			return r.resp, r.err
+		}
 	}
 }
+
 func borsaitaliana(doc *goquery.Document) (price string, date string, err error) {
 
 	doc.Find("div.l-box > div.l-box > span > strong").Each(func(i int, s *goquery.Selection) {
@@ -135,58 +202,122 @@ func borsaitaliana(doc *goquery.Document) (price string, date string, err error)
 	}
 	return
 }
+func testsource(doc *goquery.Document) (price string, date string, err error) {
 
-func TestHandler(w http.ResponseWriter, r *http.Request) {
-	// http://dahernan.github.io/2015/02/04/context-and-cancellation-of-goroutines/
-
-	headOrTails := rand.Intn(2)
-
-	if headOrTails == 0 {
-		time.Sleep(5 * time.Second)
-		fmt.Fprintf(w, "Go! slow %v", headOrTails)
-		//fmt.Printf("Go! slow %v", headOrTails)
-		return
+	doc.Find("ul > li").Each(func(i int, s *goquery.Selection) {
+		switch i {
+		case 0:
+			price = s.Text()
+		case 1:
+			date = s.Text()
+		}
+	})
+	if price == "" {
+		err = errors.New("Price not found")
 	}
-
-	time.Sleep(1 * time.Second)
-	fmt.Fprintf(w, "Go! quick %v", headOrTails)
-	//fmt.Printf("Go! quick %v", headOrTails)
 	return
 }
 
-func main2() {
+func handlerTestStockServer(w http.ResponseWriter, r *http.Request) {
+
+	a, b := 100, 3000
+	msec := a + rand.Intn(b-a)
+	fmt.Printf("msec = %+v\n", msec)
+
+	time.Sleep(time.Duration(msec) * time.Millisecond)
+
+	price := msec
+	date := time.Now()
+	fmt.Fprintf(w, "<ul>\n  <li>Price: <b>%d</b></li>\n  <li>Date: <b>%s</b></li>\n</ul>", price, date)
+}
+
+func initTestStockServer() *httptest.Server {
 
 	rand.Seed(time.Now().UTC().UnixNano())
 
-	ts := httptest.NewServer(http.HandlerFunc(TestHandler))
-	defer ts.Close()
+	return httptest.NewServer(http.HandlerFunc(handlerTestStockServer))
+}
 
-	res, err := http.Get(ts.URL)
-	if err != nil {
-		log.Fatal(err)
+func getScraperName(n int) string {
+	name := fmt.Sprintf("scraper%d", n)
+	return name
+}
 
+func initScrapers(numScrapers int) Scrapers {
+	scrapers := map[string]*Scraper{}
+	for j := 0; j < numScrapers; j++ {
+		name := getScraperName(j)
+		scrapers[name] = &Scraper{
+			Name:     name,
+			Disabled: false,
+			ParseDoc: testsource,
+		}
 	}
-	text, err := ioutil.ReadAll(res.Body)
-	res.Body.Close()
-	if err != nil {
-		log.Fatal(err)
+	return scrapers
+}
 
-	}
-
-	fmt.Printf("%s", text)
+func newStockPriceInfo(numScraper, numStock int, url string) StockPriceInfo {
+	var spi StockPriceInfo
+	spi.ScraperName = getScraperName(numScraper)
+	spi.URL = fmt.Sprintf("%s/%s/stock%d", url, spi.ScraperName, numStock)
+	return spi
 
 }
 
+// First runs query on replicas and returns the first result.
+func (s *Stock) GetStockPrice(ctx context.Context, scrapers Scrapers) *Result {
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	c := make(chan *Result, len(s.Sources))
+
+	search := func(spi StockPriceInfo) {
+		scr := scrapers[spi.ScraperName]
+		c <- scr.GetStockPrice(ctx, s.ID, spi.URL)
+	}
+
+	for _, replica := range s.Sources {
+		go search(replica)
+	}
+	select {
+	case <-ctx.Done():
+		return &Result{Err: ctx.Err()}
+	case r := <-c:
+		return r
+	}
+}
+
 func main() {
-	bi := Scraper{
-		Name:     "borsaitaliana",
-		ParseDoc: borsaitaliana,
+	t1 := time.Now()
+	// initialize test stock server
+	testStockServer := initTestStockServer()
+	// init scrapers
+	scrapers := initScrapers(3)
+
+	// init stocks
+	stock0 := Stock{
+		Name: "name0",
+		Isin: "isin0",
+		ID:   "id0",
+		Sources: []StockPriceInfo{
+			newStockPriceInfo(0, 0, testStockServer.URL),
+			newStockPriceInfo(1, 0, testStockServer.URL),
+			newStockPriceInfo(2, 0, testStockServer.URL),
+		},
 	}
 
 	ctx := context.TODO()
-	stockId := "btp"
-	url := "http://www.borsaitaliana.it/borsa/obbligazioni/mot/btp/scheda/IT0004009673.html?lang=it"
-	res := bi.GetStockPrice(ctx, stockId, url)
+
+	//spi := stock0.Sources[1]
+	//scraper := scrapers[spi.ScraperName]
+	//res := scraper.GetStockPrice(ctx, stock0.ID, spi.URL)
+
+	res := stock0.GetStockPrice(ctx, scrapers)
+
 	fmt.Printf("res = %+v\n", res)
 	fmt.Printf("Elapsed = %+v\n", res.TimeEnd.Sub(res.TimeStart))
+
+	t2 := time.Now()
+	fmt.Printf("Total Elapsed = %+v\n", t2.Sub(t1))
 }
