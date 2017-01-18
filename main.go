@@ -4,6 +4,9 @@ References:
 - [Cancelation, Context, and Plumbing](https://talks.golang.org/2014/gotham-context.slide#1)
 - [Go Concurrency Patterns: Context](https://blog.golang.org/context)
 - [Go Concurrency Patterns: Pipelines and cancellation](https://blog.golang.org/pipelines)
+
+https://gist.github.com/tmiller/5550127
+A very simple example of using a map of channels for pub/sub in go.
 */
 package main
 
@@ -14,6 +17,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"sync"
 	"time"
 
@@ -44,11 +48,12 @@ type Scraper struct {
 	Disabled           bool
 	ConcurrentRequests int
 	ParseDoc           ParseDocFunc
+	ch                 chan *ScraperRequest
 }
 
 type Scrapers map[string]*Scraper
 
-type StockPriceInfo struct {
+type StockPriceSource struct {
 	ScraperName string
 	URL         string
 	Disabled    bool
@@ -59,8 +64,10 @@ type Stock struct {
 	Isin     string
 	Name     string
 	Disabled bool
-	Sources  []StockPriceInfo
+	Sources  []StockPriceSource
 }
+
+type Stocks map[string]*Stock
 
 func (scraper *Scraper) GetStockPrice(ctx context.Context, stockId, url string) *Result {
 	if scraper == nil {
@@ -109,9 +116,11 @@ func (scraper *Scraper) GetStockPrice(ctx context.Context, stockId, url string) 
 }
 
 type ScraperRequest struct {
-	ctx     context.Context
-	stockId string
-	url     string
+	stockId     string
+	scraperName string
+	url         string
+	ctx         context.Context
+	cancel      context.CancelFunc
 }
 
 func (scraper *Scraper) dowork(requests <-chan *ScraperRequest, results chan<- *Result) {
@@ -251,17 +260,36 @@ func initScrapers(numScrapers int) Scrapers {
 			Name:     name,
 			Disabled: false,
 			ParseDoc: testsource,
+			ch:       make(chan *ScraperRequest),
 		}
 	}
 	return scrapers
 }
 
-func newStockPriceInfo(numScraper, numStock int, url string) StockPriceInfo {
-	var spi StockPriceInfo
-	spi.ScraperName = getScraperName(numScraper)
-	spi.URL = fmt.Sprintf("%s/%s/stock%d", url, spi.ScraperName, numStock)
-	return spi
+func initTestStocks(numStocks, numScrapers int, url string) Stocks {
+	stocks := Stocks{}
 
+	newSpi := func(numScraper, numStock int) StockPriceSource {
+		var spi StockPriceSource
+		spi.ScraperName = getScraperName(numScraper)
+		spi.URL = fmt.Sprintf("%s/%s/stock%d", url, spi.ScraperName, numStock)
+		return spi
+	}
+
+	for j := 0; j < numStocks; j++ {
+		suffix := strconv.Itoa(j)
+		stock := &Stock{
+			Name:    "name" + suffix,
+			Isin:    "isin" + suffix,
+			ID:      "id" + suffix,
+			Sources: []StockPriceSource{},
+		}
+		for n := 0; n < numScrapers; n++ {
+			stock.Sources = append(stock.Sources, newSpi(n, j))
+		}
+		stocks[stock.ID] = stock
+	}
+	return stocks
 }
 
 // First runs query on replicas and returns the first result.
@@ -272,7 +300,7 @@ func (s *Stock) GetStockPrice(ctx context.Context, scrapers Scrapers) *Result {
 
 	c := make(chan *Result, len(s.Sources))
 
-	search := func(spi StockPriceInfo) {
+	search := func(spi StockPriceSource) {
 		scr := scrapers[spi.ScraperName]
 		c <- scr.GetStockPrice(ctx, s.ID, spi.URL)
 	}
@@ -280,6 +308,7 @@ func (s *Stock) GetStockPrice(ctx context.Context, scrapers Scrapers) *Result {
 	for _, replica := range s.Sources {
 		go search(replica)
 	}
+
 	select {
 	case <-ctx.Done():
 		return &Result{Err: ctx.Err()}
@@ -288,32 +317,104 @@ func (s *Stock) GetStockPrice(ctx context.Context, scrapers Scrapers) *Result {
 	}
 }
 
+// Enabled return true if the stock is enabled and it has at least one source enabled.
+func (stock *Stock) Enabled() bool {
+
+	if stock != nil && !stock.Disabled {
+		for _, spi := range stock.Sources {
+			if !spi.Disabled {
+				return true
+			}
+		}
+	}
+	return false
+
+}
+
+func channelizeRequest(ctx context.Context, stocks Stocks) <-chan *ScraperRequest {
+	out := make(chan *ScraperRequest)
+	go func() {
+		for _, stock := range stocks {
+			if stock.Enabled() {
+				ctx4stock, cancel4stock := context.WithCancel(ctx)
+
+				for _, spi := range stock.Sources {
+					if spi.Disabled {
+						continue
+					}
+					sr := &ScraperRequest{
+						stockId:     stock.ID,
+						scraperName: spi.ScraperName,
+						url:         spi.URL,
+						ctx:         ctx4stock,
+						cancel:      cancel4stock,
+					}
+					out <- sr
+				}
+			}
+		}
+		close(out)
+	}()
+	return out
+}
+
+//func doJob(ctx context.Context, stocks Stocks, scrapers Scrapers) {
+
+//// creates a chan for each scraper
+//scraperChan := map[string]chan *ScraperRequest{}
+//for k, _ := range scrapers {
+//scraperChan[k] = make(chan *ScraperRequest)
+//}
+
+//go func() {
+//for stockId, stock := range stocks {
+//// creates a context for each stock
+//stockCtx, cancel := context.WithCancel(ctx)
+
+//for _, spi := range stock.Sources {
+//if spi.Disabled {
+//continue
+//}
+
+//sch, ok := scraperChan[spi.ScraperName]
+//if !ok {
+//panic(fmt.Errorf("Invalid scraper %q for stock %q", spi.ScraperName, stock.ID))
+//}
+
+//sr := &ScraperRequest{
+//ctx:     stockCtx,
+//stockId: stockId,
+//url:     spi.URL,
+//}
+//sch <- sr
+
+//}
+
+//}
+//}()
+
+//}
+
 func main() {
 	t1 := time.Now()
-	// initialize test stock server
+
+	numScrapers := 3
+	numStocks := 10
+
+	// init test stock server
 	testStockServer := initTestStockServer()
 	// init scrapers
-	scrapers := initScrapers(3)
-
+	scrapers := initScrapers(numScrapers)
 	// init stocks
-	stock0 := Stock{
-		Name: "name0",
-		Isin: "isin0",
-		ID:   "id0",
-		Sources: []StockPriceInfo{
-			newStockPriceInfo(0, 0, testStockServer.URL),
-			newStockPriceInfo(1, 0, testStockServer.URL),
-			newStockPriceInfo(2, 0, testStockServer.URL),
-		},
-	}
+	stocks := initTestStocks(numStocks, numScrapers, testStockServer.URL)
 
-	ctx := context.TODO()
+	ctx := context.Background()
 
 	//spi := stock0.Sources[1]
 	//scraper := scrapers[spi.ScraperName]
 	//res := scraper.GetStockPrice(ctx, stock0.ID, spi.URL)
 
-	res := stock0.GetStockPrice(ctx, scrapers)
+	res := stocks["id0"].GetStockPrice(ctx, scrapers)
 
 	fmt.Printf("res = %+v\n", res)
 	fmt.Printf("Elapsed = %+v\n", res.TimeEnd.Sub(res.TimeStart))
