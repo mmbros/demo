@@ -235,6 +235,56 @@ func channelizeRequest(ctx context.Context, stocks Stocks) <-chan *ScraperReques
 //}()
 
 //}
+
+func Dispatch() {
+
+	/*
+				   1. in input ha tutte le richieste (ogni source di ogni stock)
+				   2. in output restituisce un chan in cui verranno inviati i risultati
+				      (1 risultato per ciascun stock)
+				   3. per ogni tipo di scraper utilizzato,
+				        - crea una coda di job,  chan (map[string]chan <- request)
+				        - crea N istanze di scraper che lavora la coda, in base al numero
+						  di richieste concorrenti gestibili dallo scraper
+				   4. in input c'è anche il context
+				   5. per ogni stock, crea un nuovo context WithCancel -> ctx, cancel
+				   6. ogni job_request ha le seguenti info:
+				       - ctx dello stock
+					   - stock_id
+					   - url
+					   - response_chan // dove inviare i risultati.
+				   7. la job_response  ha i seguenti campi:
+				       - scraper_name
+					   - stock_id
+					   - url
+					   - time_start
+					   - time_end
+					   - err
+					   - result {stock price, stock date}
+				   8. ogni scraper prende dalla coda un job_request, la lavora,
+				      e restituisce il risultato nel job_request.response_chan
+
+
+		ordina i job, li raggruppa per scraper e per ogni scrpper
+		var jobs map[string][]*job
+
+
+		scraper_work := func(c chan *job_request, jobs []*job_request) {
+			for _, job := range jobs {
+				c <- job
+			}
+		}
+
+		for scraper_name := range scrpaers {
+			go scraper_work( scraper_chan[scraper_name], jobs[scraper_name] )
+
+		}
+
+
+	*/
+
+}
+
 // First runs query on replicas and returns the first result.
 func (s *Stock) GetStockPrice2(ctx context.Context, scrapers Scrapers) *Result {
 
