@@ -15,131 +15,17 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"math/rand"
-	"net/http"
-	"net/http/httptest"
-	"strconv"
 	"time"
-
-	"github.com/PuerkitoBio/goquery"
 )
 
-type StockPriceSource struct {
-	ScraperName string
-	URL         string
-	Disabled    bool
-}
-
-type Stock struct {
-	ID       string
-	Isin     string
-	Name     string
-	Disabled bool
-	Sources  []StockPriceSource
-}
-
-type Stocks map[string]*Stock
-
-type ScraperRequest struct {
-	stockId     string
-	scraperName string
-	url         string
-	ctx         context.Context
-	cancel      context.CancelFunc
-}
-
-func testsource(doc *goquery.Document) (price string, date string, err error) {
-
-	doc.Find("ul > li > b").Each(func(i int, s *goquery.Selection) {
-		switch i {
-		case 0:
-			price = s.Text()
-		case 1:
-			date = s.Text()
-		}
-	})
-	if price == "" {
-		err = errors.New("Price not found")
-	}
-	return
-}
-
-func handlerTestStockServer(w http.ResponseWriter, r *http.Request) {
-
-	a, b := 100, 3000
-	msec := a + rand.Intn(b-a)
-	fmt.Printf("msec = %+v\n", msec)
-
-	time.Sleep(time.Duration(msec) * time.Millisecond)
-
-	price := msec
-	date := time.Now()
-	fmt.Fprintf(w, "<ul>\n  <li>Price: <b>%d</b></li>\n  <li>Date: <b>%s</b></li>\n</ul>", price, date)
-}
-
-func initTestStockServer() *httptest.Server {
-
-	rand.Seed(time.Now().UTC().UnixNano())
-
-	return httptest.NewServer(http.HandlerFunc(handlerTestStockServer))
-}
-
-func getScraperName(n int) string {
-	name := fmt.Sprintf("scraper_%d", n)
-	return name
-}
-func getStockName(n int) string {
-	name := fmt.Sprintf("stock_%d", n)
-	return name
-}
-
-func initScrapers(numScrapers int) Scrapers {
-	scrapers := map[string]*Scraper{}
-	for j := 0; j < numScrapers; j++ {
-		name := getScraperName(j)
-		scrapers[name] = &Scraper{
-			Name:     name,
-			ParseDoc: testsource,
-		}
-	}
-	return scrapers
-}
-
-func initTestStocks(numStocks, numScrapers int, url string) Stocks {
-	stocks := Stocks{}
-
-	newSpi := func(numScraper, numStock int) StockPriceSource {
-		var spi StockPriceSource
-		spi.ScraperName = getScraperName(numScraper)
-		spi.URL = fmt.Sprintf("%s/%s/%s", url, spi.ScraperName, getStockName(numStock))
-		return spi
-	}
-
-	for j := 0; j < numStocks; j++ {
-		suffix := strconv.Itoa(j)
-		stock := &Stock{
-			Name:    "name" + suffix,
-			Isin:    "isin" + suffix,
-			ID:      "id" + suffix,
-			Sources: []StockPriceSource{},
-		}
-		for n := 0; n < numScrapers; n++ {
-			stock.Sources = append(stock.Sources, newSpi(n, j))
-		}
-		stocks[stock.ID] = stock
-	}
-	return stocks
-}
-
 // First runs query on replicas and returns the first result.
-func (s *Stock) GetStockPrice(ctx context.Context, scrapers Scrapers) *Result {
+func (s *Stock) GetStockPrice(ctx context.Context, scrapers Scrapers) *JobResult {
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	c := make(chan *Result, len(s.Sources))
+	c := make(chan *JobResult, len(s.Sources))
 
 	search := func(spi StockPriceSource) {
 		scr := scrapers[spi.ScraperName]
@@ -152,163 +38,156 @@ func (s *Stock) GetStockPrice(ctx context.Context, scrapers Scrapers) *Result {
 
 	select {
 	case <-ctx.Done():
-		return &Result{Err: ctx.Err()}
+		return &JobResult{Err: ctx.Err()}
 	case r := <-c:
 		return r
 	}
 }
 
-// Enabled return true if the stock is enabled and it has at least one source enabled.
-func (stock *Stock) Enabled() bool {
+/*
+			   1. in input ha tutte le richieste (ogni source di ogni stock)
+			   2. in output restituisce un chan in cui verranno inviati i risultati
+			      (1 risultato per ciascun stock)
+			   3. per ogni tipo di scraper utilizzato,
+			        - crea una coda di job,  chan (map[string]chan <- request)
+			        - crea N istanze di scraper che lavora la coda, in base al numero
+					  di richieste concorrenti gestibili dallo scraper
+			   4. in input c'è anche il context
+			   5. per ogni stock, crea un nuovo context WithCancel -> ctx, cancel
+			   6. ogni job_request ha le seguenti info:
+			       - ctx dello stock
+				   - stock_id
+				   - url
+				   - response_chan // dove inviare i risultati.
+			   7. la job_response  ha i seguenti campi:
+			       - scraper_name
+				   - stock_id
+				   - url
+				   - time_start
+				   - time_end
+				   - err
+				   - result {stock price, stock date}
+			   8. ogni scraper prende dalla coda un job_request, la lavora,
+			      e restituisce il risultato nel job_request.response_chan
 
-	if stock != nil && !stock.Disabled {
-		for _, spi := range stock.Sources {
-			if !spi.Disabled {
-				return true
-			}
+
+	ordina i job, li raggruppa per scraper e per ogni scrpper
+	var jobs map[string][]*job
+
+
+	scraper_work := func(c chan *job_request, jobs []*job_request) {
+		for _, job := range jobs {
+			c <- job
 		}
 	}
-	return false
+
+	for scraper_name := range scrpaers {
+		go scraper_work( scraper_chan[scraper_name], jobs[scraper_name] )
+
+	}
+
+
+*/
+
+type dispatchLayoutItem struct {
+	stockid string
+	url     string
+}
+
+type dispatchLayout map[string][]dispatchLayoutItem
+
+type JobRequest struct {
+	ctx      context.Context
+	stockid  string
+	url      string
+	respChan chan JobResult
+}
+
+func getSimpleDispatchLayout(stocks Stocks) dispatchLayout {
+	dl := map[string][]dispatchLayoutItem{}
+
+	for _, stock := range stocks {
+		if stock.Disabled {
+			continue
+		}
+		for _, src := range stock.Sources {
+			if src.Disabled {
+				continue
+			}
+			item := dispatchLayoutItem{
+				stockid: stock.ID,
+				url:     src.URL,
+			}
+			items, ok := dl[src.ScraperName]
+			if !ok {
+				items = []dispatchLayoutItem{}
+			}
+			dl[src.ScraperName] = append(items, item)
+		}
+	}
+	return dl
 
 }
 
-func channelizeRequest(ctx context.Context, stocks Stocks) <-chan *ScraperRequest {
-	out := make(chan *ScraperRequest)
+func genReqChan(ctxs map[string]context.Context, items []dispatchLayoutItem, respChan chan JobResult) chan *JobRequest {
+	out := make(chan *JobRequest)
 	go func() {
-		for _, stock := range stocks {
-			if stock.Enabled() {
-				ctx4stock, cancel4stock := context.WithCancel(ctx)
-
-				for _, spi := range stock.Sources {
-					if spi.Disabled {
-						continue
-					}
-					sr := &ScraperRequest{
-						stockId:     stock.ID,
-						scraperName: spi.ScraperName,
-						url:         spi.URL,
-						ctx:         ctx4stock,
-						cancel:      cancel4stock,
-					}
-					out <- sr
-				}
+		for _, item := range items {
+			job := &JobRequest{
+				ctx:      ctxs[item.stockid],
+				stockid:  item.stockid,
+				url:      item.url,
+				respChan: respChan,
 			}
+			out <- job
 		}
 		close(out)
 	}()
 	return out
 }
 
-//func doJob(ctx context.Context, stocks Stocks, scrapers Scrapers) {
+func Dispatch(ctx context.Context, stocks Stocks, scrapersConfig []*ScraperConfig) {
 
-//// creates a chan for each scraper
-//scraperChan := map[string]chan *ScraperRequest{}
-//for k, _ := range scrapers {
-//scraperChan[k] = make(chan *ScraperRequest)
-//}
+	dispatchLayout := getSimpleDispatchLayout(stocks)
 
-//go func() {
-//for stockId, stock := range stocks {
-//// creates a context for each stock
-//stockCtx, cancel := context.WithCancel(ctx)
-
-//for _, spi := range stock.Sources {
-//if spi.Disabled {
-//continue
-//}
-
-//sch, ok := scraperChan[spi.ScraperName]
-//if !ok {
-//panic(fmt.Errorf("Invalid scraper %q for stock %q", spi.ScraperName, stock.ID))
-//}
-
-//sr := &ScraperRequest{
-//ctx:     stockCtx,
-//stockId: stockId,
-//url:     spi.URL,
-//}
-//sch <- sr
-
-//}
-
-//}
-//}()
-
-//}
-
-func Dispatch() {
-
-	/*
-				   1. in input ha tutte le richieste (ogni source di ogni stock)
-				   2. in output restituisce un chan in cui verranno inviati i risultati
-				      (1 risultato per ciascun stock)
-				   3. per ogni tipo di scraper utilizzato,
-				        - crea una coda di job,  chan (map[string]chan <- request)
-				        - crea N istanze di scraper che lavora la coda, in base al numero
-						  di richieste concorrenti gestibili dallo scraper
-				   4. in input c'è anche il context
-				   5. per ogni stock, crea un nuovo context WithCancel -> ctx, cancel
-				   6. ogni job_request ha le seguenti info:
-				       - ctx dello stock
-					   - stock_id
-					   - url
-					   - response_chan // dove inviare i risultati.
-				   7. la job_response  ha i seguenti campi:
-				       - scraper_name
-					   - stock_id
-					   - url
-					   - time_start
-					   - time_end
-					   - err
-					   - result {stock price, stock date}
-				   8. ogni scraper prende dalla coda un job_request, la lavora,
-				      e restituisce il risultato nel job_request.response_chan
-
-
-		ordina i job, li raggruppa per scraper e per ogni scrpper
-		var jobs map[string][]*job
-
-
-		scraper_work := func(c chan *job_request, jobs []*job_request) {
-			for _, job := range jobs {
-				c <- job
-			}
+	// delete disabled scrapers from layout
+	for _, sc := range scrapersConfig {
+		if sc.Disabled {
+			fmt.Printf("deleting scraper %q\n", sc.Name)
+			delete(dispatchLayout, sc.Name)
 		}
-
-		for scraper_name := range scrpaers {
-			go scraper_work( scraper_chan[scraper_name], jobs[scraper_name] )
-
+	}
+	// print dispatchLayout
+	for k, v := range dispatchLayout {
+		fmt.Printf("%s:\n", k)
+		for j, s := range v {
+			fmt.Printf("    [%d] %+v\n", j, s)
 		}
+	}
 
+	// create the results chan
+	respChan := make(chan JobResult)
 
-	*/
+	// create a context and cancel for each stock
+	ctxs := map[string]context.Context{}
+	cancels := map[string]context.CancelFunc{}
+	for _, stock := range stocks {
+		ctx0, cancel0 := context.WithCancel(ctx)
+		ctxs[stock.ID] = ctx0
+		cancels[stock.ID] = cancel0
+	}
+
+	// create a request chan for each enabled scraper
+	// and enqueues the jobs
+	reqChan := map[string]chan *JobRequest{}
+	for scraperName, items := range dispatchLayout {
+		reqChan[scraperName] = genReqChan(ctxs, items, respChan)
+	}
+
+	// crea le istanze degli scraper che lavorano le code di jobs
 
 }
 
-// First runs query on replicas and returns the first result.
-func (s *Stock) GetStockPrice2(ctx context.Context, scrapers Scrapers) *Result {
-
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-
-	c := make(chan *Result, len(s.Sources))
-
-	search := func(spi StockPriceSource) {
-		scr := scrapers[spi.ScraperName]
-		c <- scr.GetStockPrice(ctx, s.ID, spi.URL)
-	}
-
-	for _, replica := range s.Sources {
-		go search(replica)
-	}
-
-	select {
-	case <-ctx.Done():
-		return &Result{Err: ctx.Err()}
-	case r := <-c:
-		return r
-	}
-}
 func main() {
 	t1 := time.Now()
 
@@ -317,21 +196,23 @@ func main() {
 
 	// init test stock server
 	testStockServer := initTestStockServer()
-	// init scrapers
-	scrapers := initScrapers(numScrapers)
 	// init stocks
 	stocks := initTestStocks(numStocks, numScrapers, testStockServer.URL)
 
+	scraperCfg := initScrapersConfig(numScrapers)
+
 	ctx := context.Background()
+
+	Dispatch(ctx, stocks, scraperCfg)
 
 	//spi := stock0.Sources[1]
 	//scraper := scrapers[spi.ScraperName]
 	//res := scraper.GetStockPrice(ctx, stock0.ID, spi.URL)
 
-	res := stocks["id9"].GetStockPrice(ctx, scrapers)
+	//res := stocks["id9"].GetStockPrice(ctx, scrapers)
 
-	fmt.Printf("res = %+v\n", res)
-	fmt.Printf("Elapsed = %+v\n", res.TimeEnd.Sub(res.TimeStart))
+	//fmt.Printf("res = %+v\n", res)
+	//fmt.Printf("Elapsed = %+v\n", res.TimeEnd.Sub(res.TimeStart))
 
 	t2 := time.Now()
 	fmt.Printf("Total Elapsed = %+v\n", t2.Sub(t1))

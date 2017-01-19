@@ -12,18 +12,29 @@ import (
 
 type ParseDocFunc func(doc *goquery.Document) (price string, date string, err error)
 
+type ScraperConfig struct {
+	Name     string
+	Disabled bool
+	Workers  int
+}
+
 type Scraper struct {
 	Name     string
+	Index    int
 	Disabled bool
 	ParseDoc ParseDocFunc
 }
 
 type Scrapers map[string]*Scraper
 
-// Result cointains the informations returned by a stock price scraper.
-type Result struct {
-	// name of the scraper that get the results
-	ScraperName string
+func (s *Scraper) String() string {
+	return fmt.Sprintf("%s-%d", s.Name, s.Index)
+}
+
+// JobResult cointains the informations returned by a stock price scraper.
+type JobResult struct {
+	// scraper that get the results
+	scraper *Scraper
 	// url of the html page
 	URL string
 	// stock identifier
@@ -36,7 +47,7 @@ type Result struct {
 	Err        error
 }
 
-func (res *Result) String() string {
+func (res *JobResult) String() string {
 	return fmt.Sprintf(`Result{
 	scraper:    %v,
 	stockId:    %v,
@@ -47,13 +58,13 @@ func (res *Result) String() string {
 	timeStart:  %v,
 	timeEnd:    %v,
 	elapsed:    %v,
-}`, res.ScraperName, res.StockId, res.URL,
+}`, res.scraper.String(), res.StockId, res.URL,
 		res.StockPrice, res.StockDate, res.Err,
 		res.TimeStart, res.TimeEnd, res.TimeEnd.Sub(res.TimeStart),
 	)
 }
 
-func (scraper *Scraper) GetStockPrice(ctx context.Context, stockId, url string) *Result {
+func (scraper *Scraper) GetStockPrice(ctx context.Context, stockId, url string) *JobResult {
 	// check scraper
 	if scraper == nil {
 		panic("GetStockPrice: scraper is nil")
@@ -63,11 +74,11 @@ func (scraper *Scraper) GetStockPrice(ctx context.Context, stockId, url string) 
 	}
 
 	// init the result
-	result := &Result{
-		ScraperName: scraper.Name,
-		URL:         url,
-		StockId:     stockId,
-		TimeStart:   time.Now(),
+	result := &JobResult{
+		scraper:   scraper,
+		URL:       url,
+		StockId:   stockId,
+		TimeStart: time.Now(),
 	}
 	// use defer to set timeEnd
 	defer func() { result.TimeEnd = time.Now() }()
