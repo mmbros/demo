@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -12,44 +11,66 @@ import (
 
 type ParseDocFunc func(doc *goquery.Document) (price string, date string, err error)
 
-type ScraperConfig struct {
+type Scraper struct {
 	Name     string
 	Disabled bool
 	Workers  int
-}
-
-type Scraper struct {
-	Name     string
-	Index    int
-	Disabled bool
-	ParseDoc ParseDocFunc
+	parseDoc ParseDocFunc
 }
 
 type Scrapers map[string]*Scraper
 
-func (s *Scraper) String() string {
-	return fmt.Sprintf("%s-%d", s.Name, s.Index)
+type Worker struct {
+	name     string
+	index    int
+	parseDoc ParseDocFunc
+}
+
+type Job struct {
+	stockid string
+	url     string
+}
+
+type JobRequest struct {
+	ctx     context.Context
+	resChan chan *JobResult
+	job     *Job
 }
 
 // JobResult cointains the informations returned by a stock price scraper.
 type JobResult struct {
-	// scraper that get the results
-	scraper *Scraper
-	// url of the html page
-	URL string
-	// stock identifier
-	StockId string
-	// timestamps
-	TimeStart, TimeEnd time.Time
+	worker    *Worker
+	job       *Job
+	TimeStart time.Time
+	TimeEnd   time.Time
 
 	StockPrice string
 	StockDate  string
 	Err        error
 }
 
+func newWorker(scraper *Scraper, index int) *Worker {
+	if scraper == nil {
+		return nil
+	}
+	w := &Worker{
+		name:     scraper.Name,
+		index:    index,
+		parseDoc: scraper.parseDoc,
+	}
+	return w
+}
+
+func (w *Worker) String() string {
+	if w == nil {
+		return "<nil>"
+	}
+	return fmt.Sprintf("%s-%d", w.name, w.index)
+}
+
 func (res *JobResult) String() string {
 	return fmt.Sprintf(`Result{
-	scraper:    %v,
+	worker:     %v,
 	stockId:    %v,
 	url:        %v,
 	stockPrice: %v,
@@ -58,39 +79,32 @@ func (res *JobResult) String() string {
 	timeStart:  %v,
 	timeEnd:    %v,
 	elapsed:    %v,
-}`, res.scraper.String(), res.StockId, res.URL,
+}`, res.worker.String(), res.job.stockid, res.job.url,
 		res.StockPrice, res.StockDate, res.Err,
 		res.TimeStart, res.TimeEnd, res.TimeEnd.Sub(res.TimeStart),
 	)
 }
 
-func (scraper *Scraper) GetStockPrice(ctx context.Context, stockId, url string) *JobResult {
-	// check scraper
-	if scraper == nil {
-		panic("GetStockPrice: scraper is nil")
+func (w *Worker) doJob(ctx context.Context, job *Job) *JobResult {
+	// check worker
+	if w == nil {
+		panic("GetStockPrice: worker is nil")
 	}
-	if scraper.ParseDoc == nil {
-		panic("GetStockPrice: scraper.ParseDocFunc is nil")
+	if w.parseDoc == nil {
+		panic("GetStockPrice: worker.parseDoc is nil")
 	}
 
 	// init the result
 	result := &JobResult{
-		scraper:   scraper,
-		URL:       url,
-		StockId:   stockId,
+		worker:    w,
+		job:       job,
 		TimeStart: time.Now(),
 	}
 	// use defer to set timeEnd
 	defer func() { result.TimeEnd = time.Now() }()
 
-	// return error in case of disabled scraper
-	if scraper.Disabled {
-		result.Err = errors.New("GetStockPrice: scraper is disabled")
-		return result
-	}
-
 	// get the response
-	resp, err := GetUrl(ctx, url)
+	resp, err := GetUrl(ctx, job.url)
 	if err != nil {
 		result.Err = err
 		return result
@@ -103,7 +117,7 @@ func (scraper *Scraper) GetStockPrice(ctx context.Context, stockId, url string) 
 		return result
 	}
 	// parse the response
-	price, date, err := scraper.ParseDoc(doc)
+	price, date, err := w.parseDoc(doc)
 	if err != nil {
 		result.Err = err
 		return result

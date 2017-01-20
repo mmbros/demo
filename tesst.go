@@ -49,26 +49,12 @@ func initTestStockServer() *httptest.Server {
 }
 
 func getScraperName(n int) string {
-	name := fmt.Sprintf("scraper_%d", n)
+	name := fmt.Sprintf("scraper_%d", n+1)
 	return name
 }
 func getStockName(n int) string {
-	name := fmt.Sprintf("stock_%d", n)
+	name := fmt.Sprintf("stock_%d", n+1)
 	return name
-}
-
-func initScrapersConfig(numScrapers int) []*ScraperConfig {
-	// init scraper config
-	res := []*ScraperConfig{}
-	for j := 0; j < numScrapers; j++ {
-		name := getScraperName(j)
-		res = append(res, &ScraperConfig{
-			Name:     name,
-			Disabled: false,
-			Workers:  1,
-		})
-	}
-	return res
 }
 
 func initScrapers(numScrapers int) Scrapers {
@@ -77,7 +63,9 @@ func initScrapers(numScrapers int) Scrapers {
 		name := getScraperName(j)
 		scrapers[name] = &Scraper{
 			Name:     name,
-			ParseDoc: parseTestSource,
+			Disabled: false,
+			Workers:  1,
+			parseDoc: parseTestSource,
 		}
 	}
 	return scrapers

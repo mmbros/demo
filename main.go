@@ -16,9 +16,11 @@ package main
 import (
 	"context"
 	"fmt"
+	"sync"
 	"time"
 )
 
+/*
 // First runs query on replicas and returns the first result.
 func (s *Stock) GetStockPrice(ctx context.Context, scrapers Scrapers) *JobResult {
 
@@ -43,6 +45,7 @@ func (s *Stock) GetStockPrice(ctx context.Context, scrapers Scrapers) *JobResult
 		return r
 	}
 }
+*/
 
 /*
 			   1. in input ha tutte le richieste (ogni source di ogni stock)
@@ -89,121 +92,172 @@ func (s *Stock) GetStockPrice(ctx context.Context, scrapers Scrapers) *JobResult
 
 */
 
-type dispatchLayoutItem struct {
-	stockid string
-	url     string
+type dispatchItem struct {
+	workers int
+	jobs    []*Job
 }
 
-type dispatchLayout map[string][]dispatchLayoutItem
+type dispatcher map[string]*dispatchItem
 
-type JobRequest struct {
-	ctx      context.Context
-	stockid  string
-	url      string
-	respChan chan JobResult
+func (d dispatcher) Print() {
+
+	for k, v := range d {
+		fmt.Printf("%s: (workers=%d)\n", k, v.workers)
+		for j, s := range v.jobs {
+			fmt.Printf("  job[%d] %+v\n", j, s)
+		}
+	}
+
 }
 
-func getSimpleDispatchLayout(stocks Stocks) dispatchLayout {
-	dl := map[string][]dispatchLayoutItem{}
+func newSimpleDispatcher(stocks Stocks, scrapers Scrapers) dispatcher {
+	d := map[string]*dispatchItem{}
 
 	for _, stock := range stocks {
 		if stock.Disabled {
 			continue
 		}
-		for _, src := range stock.Sources {
-			if src.Disabled {
+		for _, source := range stock.Sources {
+			if source.Disabled {
 				continue
 			}
-			item := dispatchLayoutItem{
+			// check scraper
+			scraper := scrapers[source.ScraperName]
+			if scraper == nil || scraper.Disabled {
+				continue
+			}
+
+			// stock, source and scrapers are not disabled
+			stock.enabled = true
+
+			// create the job
+			j := &Job{
 				stockid: stock.ID,
-				url:     src.URL,
+				url:     source.URL,
 			}
-			items, ok := dl[src.ScraperName]
+
+			// create/update the scraper's dispatchItem
+			item, ok := d[scraper.Name]
 			if !ok {
-				items = []dispatchLayoutItem{}
+				d[scraper.Name] = &dispatchItem{workers: scraper.Workers, jobs: []*Job{j}}
+				continue
 			}
-			dl[src.ScraperName] = append(items, item)
+			item.jobs = append(item.jobs, j)
 		}
 	}
-	return dl
+
+	return d
 
 }
 
-func genReqChan(ctxs map[string]context.Context, items []dispatchLayoutItem, respChan chan JobResult) chan *JobRequest {
+func genJobRequestChan(ctxs map[string]context.Context, jobs []*Job, resChans map[string]chan *JobResult) chan *JobRequest {
 	out := make(chan *JobRequest)
 	go func() {
-		for _, item := range items {
-			job := &JobRequest{
-				ctx:      ctxs[item.stockid],
-				stockid:  item.stockid,
-				url:      item.url,
-				respChan: respChan,
+		for _, job := range jobs {
+			stockid := job.stockid
+			req := &JobRequest{
+				ctx:     ctxs[stockid],
+				resChan: resChans[stockid],
+				job:     job,
 			}
-			out <- job
+			out <- req
 		}
 		close(out)
 	}()
 	return out
 }
 
-func Dispatch(ctx context.Context, stocks Stocks, scrapersConfig []*ScraperConfig) {
+func Dispatch(ctx context.Context, stocks Stocks, scrapers Scrapers) <-chan *JobResult {
 
-	dispatchLayout := getSimpleDispatchLayout(stocks)
+	dispatcher := newSimpleDispatcher(stocks, scrapers)
+	dispatcher.Print()
 
-	// delete disabled scrapers from layout
-	for _, sc := range scrapersConfig {
-		if sc.Disabled {
-			fmt.Printf("deleting scraper %q\n", sc.Name)
-			delete(dispatchLayout, sc.Name)
-		}
-	}
-	// print dispatchLayout
-	for k, v := range dispatchLayout {
-		fmt.Printf("%s:\n", k)
-		for j, s := range v {
-			fmt.Printf("    [%d] %+v\n", j, s)
-		}
-	}
-
-	// create the results chan
-	respChan := make(chan JobResult)
-
-	// create a context and cancel for each stock
+	// create a context with cancel and a result chan for each enabled stock
 	ctxs := map[string]context.Context{}
 	cancels := map[string]context.CancelFunc{}
+	resChans := map[string]chan *JobResult{}
 	for _, stock := range stocks {
-		ctx0, cancel0 := context.WithCancel(ctx)
-		ctxs[stock.ID] = ctx0
-		cancels[stock.ID] = cancel0
+		if stock.enabled {
+			ctx0, cancel0 := context.WithCancel(ctx)
+			ctxs[stock.ID] = ctx0
+			cancels[stock.ID] = cancel0
+			resChans[stock.ID] = make(chan *JobResult)
+		}
 	}
 
 	// create a request chan for each enabled scraper
 	// and enqueues the jobs
 	reqChan := map[string]chan *JobRequest{}
-	for scraperName, items := range dispatchLayout {
-		reqChan[scraperName] = genReqChan(ctxs, items, respChan)
+	for scraperName, item := range dispatcher {
+		reqChan[scraperName] = genJobRequestChan(ctxs, item.jobs, resChans)
 	}
 
-	// crea le istanze degli scraper che lavorano le code di jobs
+	out := make(chan *JobResult)
+
+	var wg sync.WaitGroup
+
+	// raccoglie le risposte per ogni stock enabled
+	for _, stock := range stocks {
+		if stock.enabled {
+			wg.Add(1)
+			go func(stockid string) {
+				select {
+				case res := <-resChans[stockid]:
+					out <- res
+					wg.Done()
+				case <-ctxs[stockid].Done():
+				}
+
+				cancels[stockid]()
+			}(stock.ID)
+		}
+	}
+	// Start a goroutine to close out once all the output goroutines are
+	// done.  This must start after the wg.Add call.
+	go func() {
+		wg.Wait()
+		close(out)
+
+	}()
+
+	// crea le istanze dei workers che lavorano i jobs
+	for name, item := range dispatcher {
+		for j := 0; j < item.workers; j++ {
+			worker := newWorker(scrapers[name], j+1)
+
+			go func(w *Worker, input <-chan *JobRequest) {
+				// per ogni job request ottenuto dal chan
+				for req := range input {
+					req.resChan <- w.doJob(req.ctx, req.job)
+				}
+
+			}(worker, reqChan[name])
+		}
+	}
+
+	return out
 
 }
 
 func main() {
 	t1 := time.Now()
 
-	numScrapers := 3
-	numStocks := 10
+	numScrapers := 2
+	numStocks := 3
 
 	// init test stock server
 	testStockServer := initTestStockServer()
 	// init stocks
 	stocks := initTestStocks(numStocks, numScrapers, testStockServer.URL)
 
-	scraperCfg := initScrapersConfig(numScrapers)
+	scrapers := initScrapers(numScrapers)
 
 	ctx := context.Background()
 
-	Dispatch(ctx, stocks, scraperCfg)
+	out := Dispatch(ctx, stocks, scrapers)
+	for r := range out {
+		fmt.Printf("r = %+v\n", r)
+	}
 
 	//spi := stock0.Sources[1]
 	//scraper := scrapers[spi.ScraperName]
