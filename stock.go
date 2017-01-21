@@ -16,7 +16,7 @@ type Stock struct {
 	// enabled is set to true if:
 	// - stock is enabled
 	// - stock has at least one enabled source whose scraper is enabled
-	enabled bool
+	//enabled bool
 }
 
 type Stocks map[string]*Stock

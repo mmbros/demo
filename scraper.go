@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
+	"path"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
 )
 
+// ParseDocFunc is ...
 type ParseDocFunc func(doc *goquery.Document) (price string, date string, err error)
 
 type Scraper struct {
@@ -29,6 +32,11 @@ type Worker struct {
 type Job struct {
 	stockid string
 	url     string
+}
+
+func (j *Job) String() string {
+
+	return path.Base(j.url)
 }
 
 type JobRequest struct {
@@ -69,6 +77,10 @@ func (w *Worker) String() string {
 }
 
 func (res *JobResult) String() string {
+	return fmt.Sprintf("%s - %s, err:%v", res.worker.String(), res.job.stockid, res.Err)
+}
+
+func (res *JobResult) String2() string {
 	return fmt.Sprintf(`Result{
 	worker:     %v,
 	stockId:    %v,
@@ -93,6 +105,7 @@ func (w *Worker) doJob(ctx context.Context, job *Job) *JobResult {
 	if w.parseDoc == nil {
 		panic("GetStockPrice: worker.parseDoc is nil")
 	}
+	log.Printf("JOB IN  %s - %s", w, job)
 
 	// init the result
 	result := &JobResult{
@@ -101,12 +114,20 @@ func (w *Worker) doJob(ctx context.Context, job *Job) *JobResult {
 		TimeStart: time.Now(),
 	}
 	// use defer to set timeEnd
-	defer func() { result.TimeEnd = time.Now() }()
+	defer func() {
+		result.TimeEnd = time.Now()
+
+		log.Printf("JOB OUT %s - %s, err:%v ", w, job, result.Err)
+	}()
 
 	// get the response
 	resp, err := GetUrl(ctx, job.url)
 	if err != nil {
 		result.Err = err
+		return result
+	}
+	if resp.StatusCode != http.StatusOK {
+		result.Err = fmt.Errorf(resp.Status)
 		return result
 	}
 

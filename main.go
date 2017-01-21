@@ -16,6 +16,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
+	"math/rand"
 	"sync"
 	"time"
 )
@@ -110,8 +112,25 @@ func (d dispatcher) Print() {
 
 }
 
+func (d dispatcher) shuffle() {
+
+	shuffleJobs := func(src []*Job) []*Job {
+		dest := make([]*Job, len(src))
+		perm := rand.Perm(len(src))
+		for i, v := range perm {
+			dest[v] = src[i]
+		}
+		return dest
+	}
+
+	for _, item := range d {
+		item.jobs = shuffleJobs(item.jobs)
+	}
+
+}
+
 func newSimpleDispatcher(stocks Stocks, scrapers Scrapers) dispatcher {
-	d := map[string]*dispatchItem{}
+	d := dispatcher(map[string]*dispatchItem{})
 
 	for _, stock := range stocks {
 		if stock.Disabled {
@@ -128,7 +147,7 @@ func newSimpleDispatcher(stocks Stocks, scrapers Scrapers) dispatcher {
 			}
 
 			// stock, source and scrapers are not disabled
-			stock.enabled = true
+			//stock.enabled = true
 
 			// create the job
 			j := &Job{
@@ -145,12 +164,13 @@ func newSimpleDispatcher(stocks Stocks, scrapers Scrapers) dispatcher {
 			item.jobs = append(item.jobs, j)
 		}
 	}
+	d.shuffle()
 
 	return d
 
 }
 
-func genJobRequestChan(ctxs map[string]context.Context, jobs []*Job, resChans map[string]chan *JobResult) chan *JobRequest {
+func genJobRequestChan(ctxs map[string]context.Context, jobs []*Job, resChans map[string]chan *JobResult, scraperName string) chan *JobRequest {
 	out := make(chan *JobRequest)
 	go func() {
 		for _, job := range jobs {
@@ -160,6 +180,7 @@ func genJobRequestChan(ctxs map[string]context.Context, jobs []*Job, resChans ma
 				resChan: resChans[stockid],
 				job:     job,
 			}
+			log.Printf("ENQUEUE %s - %v\n", scraperName, job)
 			out <- req
 		}
 		close(out)
@@ -172,24 +193,37 @@ func Dispatch(ctx context.Context, stocks Stocks, scrapers Scrapers) <-chan *Job
 	dispatcher := newSimpleDispatcher(stocks, scrapers)
 	dispatcher.Print()
 
+	// for each enabled stockid gives the number of enabled sources
+	sources := map[string]int{}
+
+	for _, item := range dispatcher {
+		for _, job := range item.jobs {
+			count := sources[job.stockid]
+			sources[job.stockid] = count + 1
+		}
+	}
+
+	for stockid, count := range sources {
+		fmt.Printf("sources[%s] = %d\n", stockid, count)
+	}
+
 	// create a context with cancel and a result chan for each enabled stock
 	ctxs := map[string]context.Context{}
 	cancels := map[string]context.CancelFunc{}
 	resChans := map[string]chan *JobResult{}
-	for _, stock := range stocks {
-		if stock.enabled {
-			ctx0, cancel0 := context.WithCancel(ctx)
-			ctxs[stock.ID] = ctx0
-			cancels[stock.ID] = cancel0
-			resChans[stock.ID] = make(chan *JobResult)
-		}
+	for stockid, count := range sources {
+		ctx0, cancel0 := context.WithCancel(ctx)
+		ctxs[stockid] = ctx0
+		cancels[stockid] = cancel0
+		resChans[stockid] = make(chan *JobResult, count)
+		//resChans[stockid] = make(chan *JobResult)
 	}
 
 	// create a request chan for each enabled scraper
 	// and enqueues the jobs
 	reqChan := map[string]chan *JobRequest{}
 	for scraperName, item := range dispatcher {
-		reqChan[scraperName] = genJobRequestChan(ctxs, item.jobs, resChans)
+		reqChan[scraperName] = genJobRequestChan(ctxs, item.jobs, resChans, scraperName)
 	}
 
 	out := make(chan *JobResult)
@@ -197,25 +231,37 @@ func Dispatch(ctx context.Context, stocks Stocks, scrapers Scrapers) <-chan *Job
 	var wg sync.WaitGroup
 
 	// raccoglie le risposte per ogni stock enabled
-	for _, stock := range stocks {
-		if stock.enabled {
-			wg.Add(1)
-			go func(stockid string) {
+
+	wg.Add(len(sources))
+	for stockid, count := range sources {
+		go func(stockid string, count int) {
+			todo := true
+
+			for ; count > 0; count-- {
+
 				select {
 				case res := <-resChans[stockid]:
-					out <- res
-					wg.Done()
+
+					// if not already done, send the result if ok,
+					// or if it is the last result.
+					if todo && (res.Err == nil || count == 1) {
+						todo = false
+						cancels[stockid]()
+						out <- res
+					}
 				case <-ctxs[stockid].Done():
+					cancels[stockid]()
 				}
 
-				cancels[stockid]()
-			}(stock.ID)
-		}
+			}
+			wg.Done()
+		}(stockid, count)
 	}
 	// Start a goroutine to close out once all the output goroutines are
 	// done.  This must start after the wg.Add call.
 	go func() {
 		wg.Wait()
+		log.Println("CLOSING OUT")
 		close(out)
 
 	}()
@@ -240,9 +286,10 @@ func Dispatch(ctx context.Context, stocks Stocks, scrapers Scrapers) <-chan *Job
 }
 
 func main() {
+	log.SetFlags(log.Lmicroseconds)
 	t1 := time.Now()
 
-	numScrapers := 2
+	numScrapers := 4
 	numStocks := 3
 
 	// init test stock server
@@ -250,13 +297,23 @@ func main() {
 	// init stocks
 	stocks := initTestStocks(numStocks, numScrapers, testStockServer.URL)
 
+	//fmt.Printf("Stocks = %+v\n", stocks)
+	for k, s := range stocks {
+		fmt.Printf("stock %s : [", k)
+		for _, v := range s.Sources {
+			fmt.Printf("%s, ", v.ScraperName)
+		}
+		fmt.Println("]")
+	}
+	fmt.Println()
+
 	scrapers := initScrapers(numScrapers)
 
 	ctx := context.Background()
 
 	out := Dispatch(ctx, stocks, scrapers)
 	for r := range out {
-		fmt.Printf("r = %+v\n", r)
+		log.Printf("RESULT  %v\n", r)
 	}
 
 	//spi := stock0.Sources[1]

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"log"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
@@ -30,11 +31,20 @@ func parseTestSource(doc *goquery.Document) (price string, date string, err erro
 
 func handlerTestStockServer(w http.ResponseWriter, r *http.Request) {
 
-	a, b := 100, 3000
-	msec := a + rand.Intn(b-a)
-	fmt.Printf("msec = %+v\n", msec)
+	a, b := 1000, 1000
+	msec := a
+	if a != b {
+		msec += rand.Intn(b - a)
+	}
+	//fmt.Printf("msec = %+v\n", msec)
 
 	time.Sleep(time.Duration(msec) * time.Millisecond)
+
+	if 1+rand.Intn(10) <= 6 {
+		log.Println("SERVER ERROR 500 - " + r.URL.Path)
+		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
 
 	price := msec
 	date := time.Now()
@@ -82,15 +92,16 @@ func initTestStocks(numStocks, numScrapers int, url string) Stocks {
 	}
 
 	for j := 0; j < numStocks; j++ {
-		suffix := strconv.Itoa(j)
+		suffix := strconv.Itoa(j + 1)
 		stock := &Stock{
 			Name:    "name" + suffix,
 			Isin:    "isin" + suffix,
-			ID:      "id" + suffix,
+			ID:      "id_" + suffix,
 			Sources: []StockPriceSource{},
 		}
 		for n := 0; n < numScrapers; n++ {
-			stock.Sources = append(stock.Sources, newSpi(n, j))
+			ns := (n + j) % numScrapers
+			stock.Sources = append(stock.Sources, newSpi(ns, j))
 		}
 		stocks[stock.ID] = stock
 	}
