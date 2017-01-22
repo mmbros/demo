@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"log"
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
@@ -41,8 +40,9 @@ func handlerTestStockServer(w http.ResponseWriter, r *http.Request) {
 	time.Sleep(time.Duration(msec) * time.Millisecond)
 
 	if 1+rand.Intn(10) <= 6 {
-		log.Println("SERVER ERROR 500 - " + r.URL.Path)
-		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		//log.Println("SERVER ERROR - " + r.URL.Path)
+		status := http.StatusNotFound
+		http.Error(w, http.StatusText(status), status)
 		return
 	}
 
