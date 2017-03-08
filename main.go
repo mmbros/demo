@@ -23,7 +23,7 @@ import (
 func handlerRevProxy(p *httputil.ReverseProxy) func(http.ResponseWriter, *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Println(r.URL)
-		w.Header().Set("X-Ben", "Rad")
+		w.Header().Set("X-Go-Proxy", "MMbros")
 		p.ServeHTTP(w, r)
 	}
 }
@@ -44,7 +44,9 @@ func setRevProxyRoutes(reg map[string]string) {
 func main() {
 	reg := map[string]string{
 
-		"/transmission": "http://127.0.0.1:9091",
+		"/local/":         "http://127.0.0.1:9091",
+		"/trans/mission/": "http://192.168.1.2:9091/transmission/",
+		"/transmission/":  "http://192.168.1.2:9091",
 	}
 	setRevProxyRoutes(reg)
 	log.Fatal(http.ListenAndServe(":9090", nil))
